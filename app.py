@@ -13,7 +13,6 @@ from plotly.subplots import make_subplots
 from analyzer import (
     load_log,
     analyze_axis,
-    generate_demo_log,
     AXES,
 )
 
@@ -25,8 +24,8 @@ st.set_page_config(
 
 st.title("🚁 Автоанализ и тюнинг PID по логам Betaflight")
 st.markdown(
-    "Загрузите `.bbl`/`.bfl` файл лога Blackbox или воспользуйтесь **демо-режимом**, "
-    "чтобы оценить качество настройки дрона и получить рекомендации по PID."
+    "Загрузите `.bbl`/`.bfl` файл лога Blackbox, чтобы оценить качество настройки дрона "
+    "и получить рекомендации по PID."
 )
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
@@ -36,14 +35,9 @@ uploaded_file = st.sidebar.file_uploader(
     type=["bbl", "bfl", "csv", "txt"]
 )
 
-use_demo = st.sidebar.checkbox("Использовать демо-данные", value=not uploaded_file)
-
 file_bytes = None
-if uploaded_file is not None and not use_demo:
+if uploaded_file is not None:
     file_bytes = uploaded_file.read()
-elif use_demo:
-    file_bytes = generate_demo_log()
-    st.sidebar.info("Загружены синтетические демо-данные.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("Параметры анализа")
@@ -52,7 +46,7 @@ show_fft = st.sidebar.checkbox("Показать FFT-спектр частот",
 
 # --- ОСНОВНАЯ ЛОГИКА ---
 if file_bytes is None:
-    st.warning("👈 Пожалуйста, загрузите файл лога в боковой панели или включите демо-режим.")
+    st.warning("👈 Пожалуйста, загрузите файл лога в боковой панели.")
     st.stop()
 
 try:
@@ -117,7 +111,6 @@ bar_fig.add_trace(go.Bar(name='Текущий P', x=axes_names, y=cur_p_vals, ma
 bar_fig.add_trace(go.Bar(name='Рекомендуемый P', x=axes_names, y=sug_p_vals, marker_color='lightsalmon'))
 bar_fig.update_layout(barmode='group', title="Сравнение параметра P (Текущий vs Рекомендуемый)", yaxis_title="Значение P")
 
-# Добавлен уникальный key для предотвращения ошибки StreamlitDuplicateElementId
 st.plotly_chart(bar_fig, use_container_width=True, key="summary_p_comparison_bar_chart")
 
 # --- ДЕТАЛЬНЫЙ РАЗБОР ПО ОСЯМ ---
@@ -145,15 +138,12 @@ for tab, (axis, m) in zip(tabs, axis_metrics.items()):
             if m.current_pid and m.suggested_pid:
                 st.markdown("##### ⚙️ Команда для CLI (Betaflight):")
                 p_c, i_c, d_c = m.suggested_pid
-                # Пример для pitch/roll/yaw в cli
                 axis_idx_map = {"roll": 0, "pitch": 1, "yaw": 2}
-                idx_num = axis_idx_map.get(axis, 0)
                 st.code(f"set pid_{axis} = {int(p_c)},{int(i_c)},{int(d_c)}\nsave", language="text")
 
         with col2:
             if show_raw_plots and m.time_s is not None and m.gyro is not None:
                 fig_time = go.Figure()
-                # Ограничим точки для быстроты рендеринга, если точек слишком много
                 step = max(1, len(m.time_s) // 3000)
                 
                 fig_time.add_trace(go.Scatter(
@@ -171,7 +161,6 @@ for tab, (axis, m) in zip(tabs, axis_metrics.items()):
                     margin=dict(l=20, r=20, t=40, b=20),
                     height=300
                 )
-                # Уникальный key для временного графика каждой оси
                 st.plotly_chart(fig_time, use_container_width=True, key=f"time_chart_{axis}")
 
             if show_fft and m.freqs is not None and len(m.freqs) > 0:
@@ -186,9 +175,8 @@ for tab, (axis, m) in zip(tabs, axis_metrics.items()):
                     yaxis_title="Мощность",
                     margin=dict(l=20, r=20, t=40, b=20),
                     height=250,
-                    xaxis=dict(range=[0, 200]) # Ограничим до 200 Гц для наглядности
+                    xaxis=dict(range=[0, 200])
                 )
-                # Уникальный key для FFT-графика каждой оси
                 st.plotly_chart(fig_fft, use_container_width=True, key=f"fft_chart_{axis}")
 
 st.markdown("---")

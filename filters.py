@@ -25,7 +25,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     1. Проверяет наличие и целостность входных данных.
     2. Обязательно отсекает диапазон ниже 50 Гц (где находятся движения стиков пилота и маневры дрона).
     3. Оценивает соотношение максимального пика к среднему уровню шума в рабочем диапазоне (50–400 Гц).
-    4. Если спектр ровный (нет выраженных резонансов) — сообщает, что фильтрация оптимальна.
+    4. Игнорирует мелкий фоновый шум и ищет только полноценные резонансы (>= 15-20% от максимума).
     5. Если обнаружены реальные резонансы рамы или моторов — классифицирует их по частотам
        и формирует точные команды для CLI Betaflight.
     """
@@ -56,7 +56,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     max_p = np.max(p_valid)
     mean_p = np.mean(p_valid)
 
-    # Шаг 2: Проверка на «плоский» или некорректный лог
+    # Шаг 2: Проверка на «плоский» или чистый лог
     if max_p <= mean_p * 2.0 or max_p < 0.5:
         recommendations.append(
             "⚠️ Лог в рабочей зоне (>50 Гц) выглядит относительно ровным или чистым (нет резких выраженных пиков резонанса)."
@@ -71,7 +71,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Шаг 3: Поиск реальных пиков вибраций через огибающую с жестким фильтром отсечки шумов
+    # Шаг 3: Поиск реальных пиков вибраций с фильтрацией мелкого шума (требуем, чтобы пик был весомым)
     if max_p > mean_p * 3.5 and max_p > 500.0:
         window_size = max(5, int(len(f_valid) * 0.03))
         if window_size % 2 == 0:
@@ -85,7 +85,8 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             envelope[i] = np.max(p_valid[start:end])
 
         env_mean = np.mean(envelope)
-        env_threshold = max(env_mean * 2.0, max_p * 0.15)
+        # Жесткий порог: пик должен быть заметно выше фона И составлять не менее 15-20% от максимума
+        env_threshold = max(env_mean * 2.5, max_p * 0.18)
 
         candidates = []
         for i in range(half_w, len(f_valid) - half_w):
@@ -112,7 +113,8 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 scored_peaks.append((p_valid[idx], cf))
 
             scored_peaks.sort(key=lambda x: x[0], reverse=True)
-            noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= max_p * 0.2])
+            # Отбираем только те пики, которые реально «тянут» на полноценный мешающий шум (>= 20% от максимума)
+            noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= max_p * 0.20])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
     if noise_peaks:

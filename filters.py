@@ -129,15 +129,13 @@ if noise_peaks:
         )
         cli_commands.append(f"set gyro_lowpass_hz = {int(max(70, max_peak - 15))}")
 
-    recommendations.append(
-        "💡 Совет по настройке: 
+    recommendations.append("💡 Совет по настройке: 
 Убедитесь, что задействован двунаправленный RPM-фильтр (Bi-directional DShot). "
         "Это позволяет агрессивнее распускать статические фильтры и сохранять минимальную задержку управления."
     )
     cli_commands.append("save")
 else:
-    recommendations.append(
-        "✅ Шумовой профиль в норме: 
+    recommendations.append("✅ Шумовой профиль в норме: 
 Опасных резонансов выше 50 Гц не обнаружено. "
         "Текущие настройки фильтрации работают оптимально, дополнительное зажатие фильтров не требуется."
     )

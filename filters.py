@@ -20,7 +20,7 @@ class FilterAnalysisResult:
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
     Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц)
-    с усовершенствованной фильтрацией мелких ложных зубцов.
+    с балансом: строгое локальное превышение + 3-4% от максимума оси для отсечения невидимого шума.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -64,7 +64,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Субполосный метод с жестким контролем значимости пика
+    # Субполосный метод: независимая проверка каждого 50 Гц блока
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -84,9 +84,9 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Жёсткий фильтр: пик должен быть в 4+ раза выше локального фона 
-                # И составлять значимую величину (отсекаем мелкую рябь и шумку)
-                if chunk_max > chunk_median * 4.0 and chunk_max > max(200.0, global_max * 0.03):
+                # Баланс: пик должен быть в 5 раз выше своего локального фона 
+                # И составлять не менее 3.5% от максимума данной оси (отсекает то, что на фоне шума вообще не ощущается)
+                if chunk_max > chunk_median * 5.0 and chunk_max >= global_max * 0.035:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     
@@ -125,7 +125,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             recommendations.append(
                 f"⚠️ Низкочастотный резонанс (~{int(max_peak)} Гц): "
                 "Обычно вызван недостаточной жесткостью рамы, люфтами в стэке "
-                "или касанием проводов корпуса полетного контроллера. Проверьте механику перед программным зажатием фильтров."
+                "или касанием проводов корпуса полетного контроллера. Проверьте механическую сборку перед программным зажатием фильтров."
             )
             cli_commands.append(f"set gyro_lowpass_hz = {int(max(70, max_peak - 15))}")
 

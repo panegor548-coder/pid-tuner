@@ -96,7 +96,6 @@ def _find_dynamic_column(df: pd.DataFrame, kind: str, axis_index: int) -> Option
     matching_cols = []
     for i, cl in enumerate(cols_lower):
         if any(w in cl for w in target_words):
-            # Исключаем лишние вложенные суффиксы если они не нужны, но берем похожие
             matching_cols.append(cols[i])
 
     if len(matching_cols) > axis_index:
@@ -166,7 +165,6 @@ def load_log(file_bytes: bytes) -> tuple[pd.DataFrame, dict, float]:
             f"Не нашёл колонку времени в CSV. Доступные колонки в файле: {list(df.columns)[:15]}"
         )
 
-    # Проверяем наличие гироскопа для первой оси
     test_gyro = _find_dynamic_column(df, "gyro", 0)
     if test_gyro is None:
         raise ValueError(
@@ -252,18 +250,25 @@ def _estimate_overshoot(setpoint: np.ndarray, gyro: np.ndarray, sample_rate_hz: 
 
 
 def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
-                  sample_rate_hz: float) -> Optional[AxisMetrics]:
+                 sample_rate_hz: float) -> Optional[AxisMetrics]:
     gyro_col = _find_dynamic_column(df, "gyro", axis_index)
     sp_col = _find_dynamic_column(df, "setpoint", axis_index)
 
     if gyro_col is None:
         return None
 
+    notes: list[str] = []
     gyro = pd.to_numeric(df[gyro_col], errors="coerce").fillna(0).to_numpy()
+    
+    # Проверка на пустые или статичные данные гироскопа
+    if len(gyro) == 0 or np.all(gyro == gyro[0]):
+        notes.append("❌ Данные гироскопа статичны или отсутствуют для этой оси.")
+
     if sp_col is not None:
         setpoint = pd.to_numeric(df[sp_col], errors="coerce").fillna(0).to_numpy()
     else:
         setpoint = pd.Series(gyro).rolling(5, min_periods=1, center=True).mean().to_numpy()
+        notes.append("⚠️ Колонка setpoint/rcCommand не найдена, отработка заданий не оценивалась.")
 
     n = min(len(gyro), len(setpoint))
     gyro, setpoint = gyro[:n], setpoint[:n]
@@ -301,6 +306,7 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
         oscillation_score=oscillation_score,
         noise_score=noise_score,
         current_pid=current_pid,
+        notes=notes,
         freqs=freqs,
         power=power,
         time_s=time_s,
@@ -308,7 +314,9 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
         setpoint=setpoint,
         error=error,
     )
-    metrics.suggested_pid, metrics.notes = suggest_pid(metrics)
+    suggested_pid, suggest_notes = suggest_pid(metrics)
+    metrics.suggested_pid = suggested_pid
+    metrics.notes = notes + suggest_notes
     return metrics
 
 
@@ -317,7 +325,7 @@ def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
 
     if m.current_pid is None:
         notes.append("Текущие PID не найдены в заголовке лога — используются условные "
-                      "дефолты Betaflight (45, 80, 30) как база для процентных поправок.")
+                     "дефолты Betaflight (45, 80, 30) как база для процентных поправок.")
         p, i, d = 45.0, 80.0, 30.0
     else:
         p, i, d = m.current_pid
@@ -328,8 +336,8 @@ def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
         p_mult -= 0.10
         d_mult += 0.08
         notes.append(f"Заметны низкочастотные колебания ошибки (~{m.dominant_freq_hz:.0f} Гц) "
-                      f"— снижаю P и немного поднимаю D." if m.dominant_freq_hz else
-                      "Заметны низкочастотные колебания ошибки — снижаю P и немного поднимаю D.")
+                     f"— снижаю P и немного поднимаю D." if m.dominant_freq_hz else
+                     "Заметны низкочастотные колебания ошибки — снижаю P и немного поднимаю D.")
     elif m.oscillation_score < 0.08 and m.mean_abs_error > 0:
         p_mult += 0.06
         notes.append("Колебаний почти нет, но есть отставание от setpoint — немного поднимаю P.")
@@ -342,7 +350,7 @@ def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
         p_mult -= 0.05
         d_mult += 0.05
         notes.append(f"Средний переброс после резких движений ~{m.overshoot_pct:.0f}% — "
-                      "чуть снижаю P и поднимаю D для демпфирования.")
+                     "чуть снижаю P и поднимаю D для демпфирования.")
 
     steady_bias = float(np.mean(m.error[len(m.error)//2:])) if m.error is not None and len(m.error) else 0.0
     if abs(steady_bias) > max(2.0, 0.05 * (np.std(m.setpoint) if m.setpoint is not None else 1)):

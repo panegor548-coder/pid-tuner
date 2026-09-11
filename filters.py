@@ -29,19 +29,23 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     recommendations = []
     cli_commands = []
 
-    valid_mask = freqs > 10  # отсекаем движения стиками
+    # Игнорируем низкие частоты (движения стиками, физику полета). 
+    # Реальные резонансы рамы и шумы моторов начинаются выше 80 Гц.
+    valid_mask = freqs > 80
     if np.any(valid_mask):
         f_valid = freqs[valid_mask]
         p_valid = power[valid_mask]
         
-        mean_power = np.mean(p_valid)
-        peak_mask = (p_valid > mean_power * 5.0)
-        if np.any(peak_mask):
-            peak_freqs = f_valid[peak_mask]
-            for f in peak_freqs:
-                if not noise_peaks or all(abs(f - p) > 15 for p in noise_peaks):
-                    noise_peaks.append(float(f))
-            noise_peaks = sorted(noise_peaks[:3])
+        if len(p_valid) > 0:
+            mean_power = np.mean(p_valid)
+            # Ищем пики, которые значительно выше среднего уровня шума в этом диапазоне
+            peak_mask = (p_valid > mean_power * 6.0)
+            if np.any(peak_mask):
+                peak_freqs = f_valid[peak_mask]
+                for f in peak_freqs:
+                    if not noise_peaks or all(abs(f - p) > 15 for p in noise_peaks):
+                        noise_peaks.append(float(f))
+                noise_peaks = sorted(noise_peaks[:3])
 
     if noise_peaks:
         recommendations.append(f"Обнаружены пики вибраций на частотах: {', '.join([f'{p:.1f} Гц' for p in noise_peaks])}")
@@ -56,7 +60,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         
         cli_commands.append("save")
     else:
-        recommendations.append("Шумовой профиль в норме, выраженных резонансов не обнаружено.")
+        recommendations.append("Шумовой профиль в норме, выраженных резонансов в диапазоне >80 Гц не обнаружено.")
 
     return FilterAnalysisResult(
         noise_peaks=noise_peaks,

@@ -84,8 +84,8 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Фиксированный абсолютный порог (например, 15000) + строгое локальное превышение в 4.5 раза
-                if chunk_max > chunk_median * 4.5 and chunk_max > 15000.0:
+                # Фиксированный абсолютный порог (например, 10000) + строгое локальное превышение в 4.5 раза
+                if chunk_max > chunk_median * 4.5 and chunk_max > 10000.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     

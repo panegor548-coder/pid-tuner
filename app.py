@@ -1,76 +1,52 @@
 """
-app.py — Веб-интерфейс (Streamlit) для анализа PID-регуляторов FPV-дрона по логам Betaflight.
+app.py — Веб-интерфейс (Streamlit) для FPV Autotuner.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
-from analyzer import (
-    load_log,
-    analyze_axis,
-    AXES,
-)
+from analyzer import load_log, analyze_axis, AXES
+from filters import analyze_noise_and_filters
 
 st.set_page_config(
-    page_title="FPV PID Autotuner (Betaflight)",
+    page_title="FPV PID & Filter Autotuner",
     page_icon="🚁",
     layout="wide",
 )
 
-st.title("🚁 Автоанализ и тюнинг PID по логам Betaflight")
+st.title("🚁 Автоанализ PID и фильтров по логам Betaflight")
 st.markdown(
-    "Загрузите `.bbl`/`.bfl` файл лога Blackbox, чтобы оценить качество настройки дрона "
-    "и получить рекомендации по PID."
+    "Загрузите лог Blackbox (.bbl / .bfl), чтобы оценить точность отработки, "
+    "найти частоты резонансов и получить рекомендации по PID и фильтрам."
 )
 
-# --- БОКОВАЯ ПАНЕЛЬ ---
 st.sidebar.header("Источник данных")
 uploaded_file = st.sidebar.file_uploader(
     "Выберите файл лога (.bbl, .bfl, .csv)", 
     type=["bbl", "bfl", "csv", "txt"]
 )
 
-file_bytes = None
-if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
+file_bytes = uploaded_file.read() if uploaded_file is not None else None
 
 st.sidebar.markdown("---")
-st.sidebar.header("Параметры анализа")
-show_raw_plots = st.sidebar.checkbox("Показать сырые графики сигналов", value=True)
+st.sidebar.header("Параметры отображения")
+show_raw_plots = st.sidebar.checkbox("Показать графики сигналов", value=True)
 show_fft = st.sidebar.checkbox("Показать FFT-спектр частот", value=True)
 
-# --- ОСНОВНАЯ ЛОГИКА ---
 if file_bytes is None:
     st.warning("👈 Пожалуйста, загрузите файл лога в боковой панели.")
     st.stop()
 
 try:
-    with st.spinner("Парсим лог-файл и вычисляем метрики..."):
+    with st.spinner("Парсим лог-файл..."):
         df, headers, sample_rate_hz = load_log(file_bytes)
 except Exception as e:
     st.error(f"Ошибка при чтении лога: {e}")
     st.stop()
 
-# Вывод информации о прошивке / дроне из заголовков
-if headers:
-    with st.expander("ℹ️ Информация о логе и прошивке (Headers)"):
-        cols = st.columns(3)
-        i = 0
-        for k, v in headers.items():
-            cols[i % 3].text(f"{k}: {v}")
-            i += 1
-
-st.success(
-    f"Лог успешно обработан! Частота дискретизации: **{sample_rate_hz:.1f} Гц**, "
-    f"строк данных: **{len(df):,}**"
-)
-
-# Анализируем оси
 axis_metrics = {}
 for idx, axis in enumerate(AXES):
     metrics = analyze_axis(df, headers, idx, axis, sample_rate_hz)
@@ -78,106 +54,77 @@ for idx, axis in enumerate(AXES):
         axis_metrics[axis] = metrics
 
 if not axis_metrics:
-    st.error("Не удалось найти данные ни по одной оси (Roll, Pitch, Yaw).")
+    st.error("Не удалось найти данные ни по одной оси.")
     st.stop()
 
-# --- СВОДНАЯ ТАБЛИЦА РЕКОМЕНДАЦИЙ ---
-st.markdown("### 📊 Сводка и рекомендации по PID")
+# --- ВКЛАДКИ ИНТЕРФЕЙСА ---
+tab_summary, tab_pids, tab_filters = st.tabs(["📊 Общая сводка", "⚙️ Тюнинг PID", "🛡️ Анализ шумов и фильтры"])
 
-summary_data = []
-for axis, m in axis_metrics.items():
-    cur = f"{m.current_pid[0]}, {m.current_pid[1]}, {m.current_pid[2]}" if m.current_pid else "Не найдены"
-    sug = f"{m.suggested_pid[0]}, {m.suggested_pid[1]}, {m.suggested_pid[2]}" if m.suggested_pid else "—"
-    
-    summary_data.append({
-        "Ось": axis.capitalize(),
-        "Текущие PID (P, I, D)": cur,
-        "Рекомендуемые PID": sug,
-        "RMS Ошибки": f"{m.rms_error:.2f}",
-        "Переброс (%)": f"{m.overshoot_pct:.1f}%",
-        "Шум ( ВЧ )": f"{m.noise_score * 100:.1f}%",
-    })
+with tab_summary:
+    st.markdown("### Сводная информация по полету")
+    summary_data = []
+    for axis, m in axis_metrics.items():
+        cur = f"{m.current_pid[0]}, {m.current_pid[1]}, {m.current_pid[2]}" if m.current_pid else "—"
+        sug = f"{m.suggested_pid[0]}, {m.suggested_pid[1]}, {m.suggested_pid[2]}" if m.suggested_pid else "—"
+        summary_data.append({
+            "Ось": axis.capitalize(),
+            "Текущие PID": cur,
+            "Рекомендуемые PID": sug,
+            "RMS Ошибки": f"{m.rms_error:.2f}",
+        })
+    st.table(pd.DataFrame(summary_data))
 
-summary_df = pd.DataFrame(summary_data)
-st.table(summary_df)
+with tab_pids:
+    st.markdown("### Детальный разбор отработки PID по осям")
+    sub_tabs = st.tabs([a.capitalize() for a in axis_metrics.keys()])
+    for tab, (axis, m) in zip(sub_tabs, axis_metrics.items()):
+        with tab:
+            col1, col2 = st.columns([1, 1.5])
+            with col1:
+                st.metric("RMS ошибки", f"{m.rms_error:.2f}")
+                st.metric("Переброс", f"{m.overshoot_pct:.1f}%")
+                for note in m.notes:
+                    st.info(f"• {note}")
+                if m.current_pid and m.suggested_pid:
+                    p_c, i_c, d_c = m.suggested_pid
+                    st.code(f"set pid_{axis} = {int(p_c)},{int(i_c)},{int(d_c)}\nsave", language="text")
+            with col2:
+                if show_raw_plots and m.time_s is not None and m.gyro is not None:
+                    fig = go.Figure()
+                    step = max(1, len(m.time_s) // 3000)
+                    fig.add_trace(go.Scatter(x=m.time_s[::step], y=m.setpoint[::step], name="Setpoint", line=dict(color="orange")))
+                    fig.add_trace(go.Scatter(x=m.time_s[::step], y=m.gyro[::step], name="Gyro", line=dict(color="dodgerblue")))
+                    fig.update_layout(title=f"Отработка ({axis.upper()})", height=280, margin=dict(l=20, r=20, t=30, b=20))
+                    st.plotly_chart(fig, use_container_width=True, key=f"time_pid_{axis}")
 
-# Графики сравнения текущих и рекомендуемых P
-bar_fig = go.Figure()
-axes_names = [a.capitalize() for a in axis_metrics.keys()]
-cur_p_vals = [m.current_pid[0] if m.current_pid else 45 for m in axis_metrics.values()]
-sug_p_vals = [m.suggested_pid[0] if m.suggested_pid else 45 for m in axis_metrics.values()]
-
-bar_fig.add_trace(go.Bar(name='Текущий P', x=axes_names, y=cur_p_vals, marker_color='indianred'))
-bar_fig.add_trace(go.Bar(name='Рекомендуемый P', x=axes_names, y=sug_p_vals, marker_color='lightsalmon'))
-bar_fig.update_layout(barmode='group', title="Сравнение параметра P (Текущий vs Рекомендуемый)", yaxis_title="Значение P")
-
-st.plotly_chart(bar_fig, use_container_width=True, key="summary_p_comparison_bar_chart")
-
-# --- ДЕТАЛЬНЫЙ РАЗБОР ПО ОСЯМ ---
-st.markdown("---")
-st.markdown("### 🔍 Подробный разбор по осям")
-
-tabs = st.tabs([a.capitalize() for a in axis_metrics.keys()])
-
-for tab, (axis, m) in zip(tabs, axis_metrics.items()):
-    with tab:
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.markdown(f"#### Ось: {axis.upper()}")
-            st.metric("RMS ошибки слежения", f"{m.rms_error:.2f}")
-            st.metric("Средняя абс. ошибка", f"{m.mean_abs_error:.2f}")
-            st.metric("Оценка переброса", f"{m.overshoot_pct:.1f}%")
-            if m.dominant_freq_hz:
-                st.metric("Доминирующая частота колебаний", f"{m.dominant_freq_hz:.1f} Гц")
+with tab_filters:
+    st.markdown("### Анализ спектра шумов и рекомендации по фильтрации")
+    filter_sub_tabs = st.tabs([a.capitalize() for a in axis_metrics.keys()])
+    for tab, (axis, m) in zip(filter_sub_tabs, axis_metrics.items()):
+        with tab:
+            f_res = analyze_noise_and_filters(m.freqs, m.power)
             
-            st.markdown("##### 💡 Выводы и советы:")
-            for note in m.notes:
-                st.info(f"• {note}")
-                
-            if m.current_pid and m.suggested_pid:
-                st.markdown("##### ⚙️ Команда для CLI (Betaflight):")
-                p_c, i_c, d_c = m.suggested_pid
-                axis_idx_map = {"roll": 0, "pitch": 1, "yaw": 2}
-                st.code(f"set pid_{axis} = {int(p_c)},{int(i_c)},{int(d_c)}\nsave", language="text")
-
-        with col2:
-            if show_raw_plots and m.time_s is not None and m.gyro is not None:
-                fig_time = go.Figure()
-                step = max(1, len(m.time_s) // 3000)
-                
-                fig_time.add_trace(go.Scatter(
-                    x=m.time_s[::step], y=m.setpoint[::step], 
-                    name="Setpoint (Команда)", line=dict(color="orange", width=1.5)
-                ))
-                fig_time.add_trace(go.Scatter(
-                    x=m.time_s[::step], y=m.gyro[::step], 
-                    name="Gyro (Факт)", line=dict(color="dodgerblue", width=1)
-                ))
-                fig_time.update_layout(
-                    title=f"Отработка задания по оси {axis.upper()}",
-                    xaxis_title="Время (с)",
-                    yaxis_title="Градусы/сек",
-                    margin=dict(l=20, r=20, t=40, b=20),
-                    height=300
-                )
-                st.plotly_chart(fig_time, use_container_width=True, key=f"time_chart_{axis}")
-
-            if show_fft and m.freqs is not None and len(m.freqs) > 0:
-                fig_fft = go.Figure()
-                fig_fft.add_trace(go.Scatter(
-                    x=m.freqs, y=m.power,
-                    name="FFT ошибки", line=dict(color="mediumpurple", width=1.5)
-                ))
-                fig_fft.update_layout(
-                    title=f"Спектр частот ошибки ({axis.upper()})",
-                    xaxis_title="Частота (Гц)",
-                    yaxis_title="Мощность",
-                    margin=dict(l=20, r=20, t=40, b=20),
-                    height=250,
-                    xaxis=dict(range=[0, 200])
-                )
-                st.plotly_chart(fig_fft, use_container_width=True, key=f"fft_chart_{axis}")
+            col1, col2 = st.columns([1, 1.5])
+            with col1:
+                st.markdown(f"#### Ось: {axis.upper()}")
+                for rec in f_res.recommendations:
+                    st.warning(f"• {rec}")
+                if f_res.cli_commands:
+                    st.markdown("##### ⚙️ Команды фильтров для CLI:")
+                    st.code("\n".join(f_res.cli_commands), language="text")
+            with col2:
+                if show_fft and m.freqs is not None and m.power is not None:
+                    fig_fft = go.Figure()
+                    fig_fft.add_trace(go.Scatter(x=m.freqs, y=m.power, name="Спектр шума", line=dict(color="mediumpurple")))
+                    for peak in f_res.noise_peaks:
+                        fig_fft.add_vline(x=peak, line_dash="dash", line_color="red", annotation_text=f"{peak:.0f}Hz")
+                    fig_fft.update_layout(
+                        title=f"FFT спектр шумов ({axis.upper()})",
+                        xaxis_title="Гц", yaxis_title="Мощность",
+                        height=300, margin=dict(l=20, r=20, t=30, b=20),
+                        xaxis=dict(range=[0, 400])
+                    )
+                    st.plotly_chart(fig_fft, use_container_width=True, key=f"fft_filter_{axis}")
 
 st.markdown("---")
-st.caption("FPV PID Autotuner • Построено на Streamlit, Pandas и Plotly")
+st.caption("FPV PID & Filter Autotuner • Модульная архитектура")

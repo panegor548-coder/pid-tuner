@@ -1,6 +1,6 @@
 """
 analyzer.py — парсинг Betaflight blackbox-логов (CSV) и эвристический расчёт PID
-с учетом методологии Betaflight 4.4 (по гайдам Криса Россера).
+с учетом методологии Betaflight 4.4+ (по гайдам Криса Россера и практикам форумного тюнинга).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ class AxisMetrics:
     rms_error: float
     mean_abs_error: float
     overshoot_pct: float
+    bounce_back_score: float  # Новая метрика отскока в конце маневра
     low_freq_power: float
     high_freq_power: float
     dominant_freq_hz: Optional[float]
@@ -182,24 +183,25 @@ def _band_power(freqs: np.ndarray, power: np.ndarray, lo: float, hi: float) -> f
     return float(np.sum(power[mask]))
 
 
-def _estimate_overshoot(setpoint: np.ndarray, gyro: np.ndarray, sample_rate_hz: float) -> float:
-    """Оценивает переброс (overshoot) по реакции гироскопа на резкие изменения setpoint."""
+def _estimate_overshoot(setpoint: np.ndarray, gyro: np.ndarray, sample_rate_hz: float) -> tuple[float, float]:
+    """Оценивает переброс (overshoot) и паразитный отскок (bounce-back) после завершения маневра."""
     if len(setpoint) < int(sample_rate_hz * 0.1):
-        return 0.0
+        return 0.0, 0.0
 
     sp_std = float(np.std(setpoint))
     if sp_std < 1e-6:
-        return 0.0
+        return 0.0, 0.0
 
     d_setpoint = np.diff(setpoint)
     abs_d = np.abs(d_setpoint)
     threshold = max(float(np.percentile(abs_d, 99)), 0.15 * sp_std)
     if threshold <= 0:
-        return 0.0
+        return 0.0, 0.0
 
     step_idxs = np.where(abs_d > threshold)[0]
     window = int(sample_rate_hz * 0.15)
     overshoots = []
+    bounce_backs = []
 
     for idx in step_idxs:
         if idx < 1:
@@ -219,15 +221,29 @@ def _estimate_overshoot(setpoint: np.ndarray, gyro: np.ndarray, sample_rate_hz: 
         if step_size > 0:
             peak = float(np.max(segment))
             overshoot = max(0.0, (peak - post_target) / abs(step_size)) * 100
+            
+            # Поиск отскока в самом конце остановки (bounce-back)
+            if end + int(sample_rate_hz * 0.08) < len(gyro):
+                stop_segment = gyro[end : end + int(sample_rate_hz * 0.08)]
+                if len(stop_segment) > 0:
+                    dip = float(np.min(stop_segment))
+                    bounce = max(0.0, (post_target - dip) / abs(step_size)) * 100
+                    bounce_backs.append(bounce)
         else:
             peak = float(np.min(segment))
             overshoot = max(0.0, (post_target - peak) / abs(step_size)) * 100
+            if end + int(sample_rate_hz * 0.08) < len(gyro):
+                stop_segment = gyro[end : end + int(sample_rate_hz * 0.08)]
+                if len(stop_segment) > 0:
+                    spike = float(np.max(stop_segment))
+                    bounce = max(0.0, (spike - post_target) / abs(step_size)) * 100
+                    bounce_backs.append(bounce)
+
         overshoots.append(overshoot)
 
-    if not overshoots:
-        return 0.0
-
-    return float(np.clip(np.median(overshoots), 0, 200))
+    med_overshoot = float(np.clip(np.median(overshoots), 0, 200)) if overshoots else 0.0
+    med_bounce = float(np.clip(np.median(bounce_backs), 0, 200)) if bounce_backs else 0.0
+    return med_overshoot, med_bounce
 
 
 def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
@@ -271,7 +287,7 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
     oscillation_score = low_power / total_power if total_power else 0.0
     noise_score = high_power / total_power if total_power else 0.0
 
-    overshoot_pct = _estimate_overshoot(setpoint, gyro, sample_rate_hz)
+    overshoot_pct, bounce_back_score = _estimate_overshoot(setpoint, gyro, sample_rate_hz)
     current_pid = _extract_current_pid(headers, axis)
 
     metrics = AxisMetrics(
@@ -280,6 +296,7 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
         rms_error=rms_error,
         mean_abs_error=mean_abs_error,
         overshoot_pct=overshoot_pct,
+        bounce_back_score=bounce_back_score,
         low_freq_power=low_power,
         high_freq_power=high_power,
         dominant_freq_hz=dominant_freq,
@@ -302,7 +319,12 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
 
 
 def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
-    """Эвристика PID с учетом баланса пружины (P) и демпфера/амортизатора (D)."""
+    """
+    Эвристика PID с учетом современной методологии (Крис Россер / Betaflight 4.4+):
+    - Баланс пружины (P) и демпфера/амортизатора (D).
+    - Диагностика отскоков в конце маневров (bounce-back).
+    - Разделение низкочастотных раскачек (слабый D или избыточный P) и ВЧ-шумов.
+    """
     notes: list[str] = []
 
     if m.current_pid is None:
@@ -313,36 +335,44 @@ def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
 
     p_mult, i_mult, d_mult = 1.0, 1.0, 1.0
 
-    # Анализ колебаний (эквивалент избытка P или слабого D)
+    # 1. Анализ низкочастотных колебаний (осцилляций)
     if m.oscillation_score > 0.35:
         p_mult -= 0.10
         d_mult += 0.08
+        freq_str = f" (~{m.dominant_freq_hz:.0f} Гц)" if m.dominant_freq_hz else ""
         notes.append(
-            f"⚡ Замечены низкочастотные колебания (~{m.dominant_freq_hz:.0f} Гц). "
-            "Это значит, что 'пружина' (P) слишком сильная, либо 'амортизатор' (D) слабый — снижаем P, поднимаем D."
-            if m.dominant_freq_hz else
-            "⚡ Замечены низкочастотные колебания — снижаем P, поднимаем D для демпфирования."
+            f"⚡ Обнаружены низкочастотные колебания{freq_str}. "
+            "Пружина (P) перенатянута или амортизатор (D) слишком слаб — рекомендуется снизить P и поднять D."
         )
     elif m.oscillation_score < 0.08 and m.mean_abs_error > 0:
-        p_mult += 0.05
-        notes.append("💡 Колебаний нет, отклик стабилен — можно немного поднять P для повышения резкости.")
+        p_mult += 0.03
+        notes.append("💡 Контур стабилен, колебаний нет — траектория отслеживается чисто.")
 
-    # Анализ шума (эквивалент избытка D)
+    # 2. Анализ паразитного отскока в конце роллов/флипов (классический симптом пункта #1 шпаргалки)
+    if m.bounce_back_score > 8.0:
+        d_mult += 0.10
+        notes.append(
+            f"🔄 Зафиксирован отскок (bounce-back) в конце маневра ~{m.bounce_back_score:.1f}%. "
+            "Демпфирование (D) не успевает гасить инерцию — необходимо увеличить D."
+        )
+
+    # 3. Анализ высокочастотного шума (риск перегрева моторов)
     if m.noise_score > 0.30:
         d_mult -= 0.10
-        notes.append("🔊 Высокий уровень высокочастотного шума в петле — рекомендуется уменьшить D или проверить фильтры.")
+        notes.append("🔊 Высокий уровень высокочастотного шума в петле. Чрезмерное значение D может перегреть моторы — рекомендуется уменьшить D или проверить фильтры/пропеллеры.")
 
-    # Анализ переброса (overshoot) по шагам
+    # 4. Анализ переброса (overshoot)
     if m.overshoot_pct > 12:
         p_mult -= 0.05
         d_mult += 0.05
         notes.append(
-            f"🎯 Зафиксирован переброс (overshoot) ~{m.overshoot_pct:.0f}%. "
-            "Дрон перелетает целевую точку перед стабилизацией — слегка уменьшаем P и увеличиваем D."
+            f"🎯 Переброс (overshoot) составляет ~{m.overshoot_pct:.0f}%. "
+            "Дрон проскакивает целевую точку — слегка уменьшаем P и увеличиваем D для жесткой фиксации."
         )
 
+    # Ограничения безопасного шага (не даем алгоритму резко менять настройки за один раз)
     p_mult = float(np.clip(p_mult, 0.80, 1.20))
-    i_mult = float(np.clip(i_mult, 0.85, 1.15))
+    i_mult = float(np.clip(i_mult, 0.90, 1.10))
     d_mult = float(np.clip(d_mult, 0.80, 1.25))
 
     new_p = round(p * p_mult)
@@ -350,7 +380,7 @@ def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
     new_d = round(d * d_mult)
 
     if not notes:
-        notes.append("✅ Настройка сбалансирована, отклонения в пределах нормы.")
+        notes.append("✅ Баланс P/I/D оптимален. Корректировка не требуется.")
 
     return (new_p, new_i, new_d), notes
 

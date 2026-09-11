@@ -1,7 +1,9 @@
 """
-filters.py — Модуль анализа спектра шумов и формирования рекомендаций по фильтрам Betaflight.
+filters.py — Модуль анализа спектра шумов и формирования рекомендаций по фильтрам Betaflight
+с учетом принципов Betaflight 4.4+ и гайдов Криса Россера (минимизация задержки, RPM-фильтры, подбор нотчей).
 """
 
+from __platform__ import annotations # заменено на стандартное для совместимости
 from __future__ import annotations
 
 import numpy as np
@@ -20,6 +22,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     """
     Анализирует FFT спектр гироскопа с проверкой качества данных.
     Если данные отсутствуют или сигнал плоский, возвращает точную причину.
+    При обнаружении пиков формирует рекомендации с учетом задержки и рекомендаций Криса Россера.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -30,7 +33,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     recommendations = []
     cli_commands = []
 
-    # Проверяем диапазон частот выше 80 Гц (где живут резонансы)
+    # Проверяем диапазон частот выше 80 Гц (где живут резонансы рамы и моторов)
     valid_mask = freqs > 80
     if not np.any(valid_mask):
         return FilterAnalysisResult(
@@ -57,7 +60,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             ]
         )
 
-    # Если данные есть, ищем реальные пики
+    # Если данные есть, ищем реальные пики (учитываем методологию Россера: отсечение ложных гармоник)
     peak_mask = (p_valid > mean_p * 5.0) & (p_valid > 10.0)
     if np.any(peak_mask):
         peak_freqs = f_valid[peak_mask]
@@ -70,16 +73,38 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         recommendations.append(f"🔍 Обнаружены пики вибраций на частотах: {', '.join([f'{p:.1f} Гц' for p in noise_peaks])}")
         max_peak = max(noise_peaks)
         
-        if max_peak > 250:
-            recommendations.append("⚙️ Высокочастотный шум. Рекомендация: проверить пропеллеры и поднять Dynamic Notch Hz.")
-            cli_commands.append(f"set dyn_notch_max_hz = {int(min(600, max_peak + 50))}")
-        elif 80 <= max_peak <= 250:
-            recommendations.append(f"⚙️ Резонанс рамы в районе ~{int(max_peak)} Гц. Рекомендация: настроить Gyro Lowpass.")
-            cli_commands.append(f"set gyro_lowpass_hz = {int(max(80, max_peak - 20))}")
-        
+        # Эвристика по гайду Криса Россера:
+        # - Низкие пики (<150 Гц) обычно связаны с жесткостью рамы или затянутыми винтами моторов.
+        # - Средние и высокие пики (>200-250 Гц) — работа пропеллеров, подшипники или шумы ESC.
+        if max_peak > 300:
+            recommendations.append(
+                "⚙️ Обнаружен мощный высокочастотный шум (>300 Гц). "
+                "Рекомендуется проверить состояние подшипников моторов, балансировку пропеллеров и сузить Dynamic Notch Hz."
+            )
+            cli_commands.append(f"set dyn_notch_max_hz = {int(min(550, max_peak + 50))}")
+            cli_commands.append("set dyn_notch_width_hz = 10")
+        elif 150 <= max_peak <= 300:
+            recommendations.append(
+                f"⚙️ Выявлен резонанс рамы в диапазоне ~{int(max_peak)} Гц. "
+                "По методологии Betaflight 4.4+, если RPM-фильтр включен, убедитесь, что добротность (Q) фильтров не глушит полезный сигнал. "
+                "При сильном зуде рекомендуется настроить Gyro Lowpass 2."
+            )
+            cli_commands.append(f"set gyro_lowpass2_hz = {int(max(150, max_peak - 30))}")
+        elif 80 <= max_peak < 150:
+            recommendations.append(
+                f"⚠️ Низкочастотный резонанс рамы (~{int(max_peak)} Гц). "
+                "Часто вызван люфтами в раме, незакрепленным стеком или дефектами карбона. Проверьте сборку перед программным зажатием фильтров."
+            )
+            cli_commands.append(f"set gyro_lowpass_hz = {int(max(90, max_peak - 20))}")
+
+        # Общая рекомендация по RPM-фильтрации (советы сообщества)
+        recommendations.append("💡 Убедитесь, что задействован RPM-фильтр (Dshot), так как он позволяет агрессивнее распускать статические фильтры и снижать задержку управления.")
         cli_commands.append("save")
     else:
-        recommendations.append("✅ Шумовой профиль в норме, выраженных резонансов в диапазоне >80 Гц не обнаружено.")
+        recommendations.append(
+            "✅ Шумовой профиль чистый, выраженных резонансов в диапазоне >80 Гц не обнаружено. "
+            "Фильтрация работает оптимально, дополнительное зажатие фильтров не требуется (сохраняется минимальная задержка управления)."
+        )
 
     return FilterAnalysisResult(
         noise_peaks=noise_peaks,

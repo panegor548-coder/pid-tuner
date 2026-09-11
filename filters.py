@@ -3,7 +3,6 @@ filters.py — Модуль анализа спектра шумов и форм
 с учетом принципов Betaflight 4.4+ и гайдов Криса Россера (минимизация задержки, RPM-фильтры, подбор нотчей).
 """
 
-from __platform__ import annotations # заменено на стандартное для совместимости
 from __future__ import annotations
 
 import numpy as np

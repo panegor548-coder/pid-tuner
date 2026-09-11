@@ -20,14 +20,6 @@ class FilterAnalysisResult:
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
     Анализирует FFT спектр гироскопа с проверкой качества данных.
-
-    Логика работы:
-    1. Проверяет наличие и целостность входных данных.
-    2. Обязательно отсекает диапазон ниже 50 Гц (где находятся движения стиков пилота и маневры дрона).
-    3. Оценивает соотношение максимального пика к среднему уровню шума в рабочем диапазоне (50–400 Гц).
-    4. Игнорирует мелкий фоновый шум и ищет только полноценные резонансы (>= 15-20% от максимума).
-    5. Если обнаружены реальные резонансы рамы или моторов — классифицирует их по частотам
-       и формирует точные команды для CLI Betaflight.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -71,50 +63,49 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Шаг 3: Поиск реальных пиков вибраций с фильтрацией мелкого шума (требуем, чтобы пик был весомым)
-    if max_p > mean_p * 3.5 and max_p > 500.0:
-        window_size = max(5, int(len(f_valid) * 0.03))
-        if window_size % 2 == 0:
-            window_size += 1
+    # Шаг 3: Поиск реальных пиков вибраций через локальную огибающую (независимо от общего максимума)
+    window_size = max(5, int(len(f_valid) * 0.03))
+    if window_size % 2 == 0:
+        window_size += 1
 
-        envelope = np.copy(p_valid)
-        half_w = window_size // 2
-        for i in range(len(p_valid)):
-            start = max(0, i - half_w)
-            end = min(len(p_valid), i + half_w + 1)
-            envelope[i] = np.max(p_valid[start:end])
+    envelope = np.copy(p_valid)
+    half_w = window_size // 2
+    for i in range(len(p_valid)):
+        start = max(0, i - half_w)
+        end = min(len(p_valid), i + half_w + 1)
+        envelope[i] = np.max(p_valid[start:end])
 
-        env_mean = np.mean(envelope)
-        # Жесткий порог: пик должен быть заметно выше фона И составлять не менее 15-20% от максимума
-        env_threshold = max(env_mean * 2.5, max_p * 0.18)
+    # Используем локальную медиану, чтобы локальные выбросы не искажали общую планку
+    env_mean = np.median(envelope)
+    env_threshold = max(env_mean * 3.0, 10.0)
 
-        candidates = []
-        for i in range(half_w, len(f_valid) - half_w):
-            if f_valid[i] < 50.0:
-                continue
+    candidates = []
+    for i in range(half_w, len(f_valid) - half_w):
+        if f_valid[i] < 50.0:
+            continue
 
-            current_val = envelope[i]
-            if current_val >= env_threshold:
-                is_local_max = True
-                for j in range(i - half_w, i + half_w + 1):
-                    if envelope[j] > current_val:
-                        is_local_max = False
-                        break
+        current_val = envelope[i]
+        if current_val >= env_threshold:
+            is_local_max = True
+            for j in range(i - half_w, i + half_w + 1):
+                if envelope[j] > current_val:
+                    is_local_max = False
+                    break
 
-                if is_local_max:
-                    f_cand = float(f_valid[i])
-                    if not candidates or all(abs(f_cand - existing) > 40.0 for existing in candidates):
-                        candidates.append(f_cand)
+            if is_local_max:
+                f_cand = float(f_valid[i])
+                if not candidates or all(abs(f_cand - existing) > 40.0 for existing in candidates):
+                    candidates.append(f_cand)
 
-        if candidates:
-            scored_peaks = []
-            for cf in candidates:
-                idx = np.argmin(np.abs(f_valid - cf))
-                scored_peaks.append((p_valid[idx], cf))
+    if candidates:
+        scored_peaks = []
+        for cf in candidates:
+            idx = np.argmin(np.abs(f_valid - cf))
+            scored_peaks.append((p_valid[idx], cf))
 
-            scored_peaks.sort(key=lambda x: x[0], reverse=True)
-            # Отбираем только те пики, которые реально «тянут» на полноценный мешающий шум (>= 20% от максимума)
-            noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= max_p * 0.20])
+        scored_peaks.sort(key=lambda x: x[0], reverse=True)
+        # Отбираем пики, уверенно возвышающиеся над медианным фоном
+        noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= env_mean * 3.5])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
     if noise_peaks:

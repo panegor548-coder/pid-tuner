@@ -60,7 +60,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         )
         return FilterAnalysisResult(
             noise_peaks=[],
-            recommendations,
+            recommendations=recommendations,
             cli_commands=[]
         )
 
@@ -85,7 +85,6 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_median = np.median(p_chunk)
                 
                 # Адаптивный поиск: пик должен заметно выделяться на фоне своего локального окружения (в 4 раза)
-                # Без жестких ограничений по абсолютной мощности, чтобы не терять реальные слабые резонансы.
                 if chunk_max > chunk_median * 4.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])

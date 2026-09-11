@@ -19,7 +19,7 @@ class FilterAnalysisResult:
 
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
-    Анализирует FFT спектр гироскопа с проверкой качества данных.
+    Анализирует FFT спектр гироскопа по методу субполосных блоков (chunks по 50 Гц).
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -30,7 +30,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     recommendations: List[str] = []
     cli_commands: List[str] = []
 
-    # Шаг 1: Игнорируем зону 0-30 Гц (там движения стиков), но ловим резонансы от 30 Гц и выше
+    # Отсекаем только самый грязный подвал до 30 Гц
     valid_mask = freqs >= 30.0
     if not np.any(valid_mask):
         return FilterAnalysisResult(
@@ -45,11 +45,11 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             recommendations=["❌ Отсутствуют данные гироскопа в диапазоне выше 30 Гц."]
         )
 
-    max_p = np.max(p_valid)
-    mean_p = np.mean(p_valid)
+    global_max = np.max(p_valid)
+    global_mean = np.mean(p_valid)
 
-    # Шаг 2: Проверка на «плоский» или чистый лог
-    if max_p <= mean_p * 2.0 or max_p < 0.5:
+    # Проверка на общий чистый лог
+    if global_max <= global_mean * 2.0 or global_max < 0.5:
         recommendations.append(
             "⚠️ Лог в рабочей зоне (>30 Гц) выглядит относительно ровным или чистым (нет резких выраженных пиков резонанса)."
         )
@@ -63,52 +63,48 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Шаг 3: Поиск реальных пиков вибраций через локальную огибающую
-    window_size = max(5, int(len(f_valid) * 0.03))
-    if window_size % 2 == 0:
-        window_size += 1
-
-    envelope = np.copy(p_valid)
-    half_w = window_size // 2
-    for i in range(len(p_valid)):
-        start = max(0, i - half_w)
-        end = min(len(p_valid), i + half_w + 1)
-        envelope[i] = np.max(p_valid[start:end])
-
-    env_mean = np.median(envelope)
-    env_threshold = max(env_mean * 3.0, 10.0)
-
+    # Метод субполос (биений по 50 Гц): ищем пики в каждом окне независимо, чтобы мощные низы не глушили верхи
+    chunk_size = 50.0
+    min_f = 30.0
+    max_f = 400.0
+    
     candidates = []
-    for i in range(half_w, len(f_valid) - half_w):
-        if f_valid[i] < 30.0:
-            continue
 
-        current_val = envelope[i]
-        if current_val >= env_threshold:
-            is_local_max = True
-            for j in range(i - half_w, i + half_w + 1):
-                if envelope[j] > current_val:
-                    is_local_max = False
-                    break
+    current_start = min_f
+    while current_start < max_f:
+        current_end = current_start + chunk_size
+        
+        # Выделяем срез частот для текущего диапазона (например, 30-80, 80-130 и т.д.)
+        chunk_mask = (f_valid >= current_start) & (f_valid < current_end)
+        if np.any(chunk_mask):
+            f_chunk = f_valid[chunk_mask]
+            p_chunk = p_valid[chunk_mask]
+            
+            if len(p_chunk) > 5:
+                chunk_max = np.max(p_chunk)
+                chunk_median = np.median(p_chunk)
+                
+                # Если в этом конкретном диапазоне есть пик, который заметно выше локального фона куска
+                if chunk_max > chunk_median * 2.8 and chunk_max > 20.0:
+                    peak_idx = np.argmax(p_chunk)
+                    peak_freq = float(f_chunk[peak_idx])
+                    
+                    # Проверяем, что пик не прилип вплотную к границе среза и уникален
+                    if not candidates or all(abs(peak_freq - existing) > 25.0 for existing in candidates):
+                        candidates.append((chunk_max, peak_freq))
 
-            if is_local_max:
-                f_cand = float(f_valid[i])
-                if not candidates or all(abs(f_cand - existing) > 40.0 for existing in candidates):
-                    candidates.append(f_cand)
+        current_start = current_end
 
+    # Сортируем найденные по всем кускам пики по силе мощности
     if candidates:
-        scored_peaks = []
-        for cf in candidates:
-            idx = np.argmin(np.abs(f_valid - cf))
-            scored_peaks.append((p_valid[idx], cf))
-
-        scored_peaks.sort(key=lambda x: x[0], reverse=True)
-        noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= env_mean * 3.5])
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        # Берем топ-2 самых ярких независимых пика из разных диапазонов
+        noise_peaks = sorted([item[1] for item in candidates[:2]])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
     if noise_peaks:
         peaks_str = ", ".join([f"{p:.1f} Гц" for p in noise_peaks])
-        recommendations.append(f"🔍 Обнаружены выраженные пики вибраций на частотах: {peaks_str}")
+        recommendations.append(f"🔍 Обнаружены выраженные пики вибраций по диапазонам: {peaks_str}")
 
         max_peak = max(noise_peaks)
 
@@ -145,7 +141,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     else:
         recommendations.append(
             "✅ Шумовой профиль в норме: "
-            "Опасных резонансов выше 30 Гц не обнаружено. "
+            "Опасных резонансов ни в одном из диапазонов не обнаружено. "
             "Текущие настройки фильтрации работают оптимально, дополнительное зажатие фильтров не требуется."
         )
 

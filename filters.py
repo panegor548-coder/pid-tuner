@@ -30,11 +30,11 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     recommendations: List[str] = []
     cli_commands: List[str] = []
 
-    # Шаг 1: Игнорируем зону 0-50 Гц (там живут движения стиков и пилотирование, а не шум моторов)
-    valid_mask = freqs >= 50.0
+    # Шаг 1: Игнорируем зону 0-30 Гц (там движения стиков), но ловим резонансы от 30 Гц и выше
+    valid_mask = freqs >= 30.0
     if not np.any(valid_mask):
         return FilterAnalysisResult(
-            recommendations=["❌ Недостаточно данных: частотная сетка лога слишком узкая для поиска резонансов (требуется диапазон >50 Гц)."]
+            recommendations=["❌ Недостаточно данных: частотная сетка лога слишком узкая (требуется диапазон >30 Гц)."]
         )
 
     f_valid = freqs[valid_mask]
@@ -42,7 +42,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
 
     if len(p_valid) == 0:
         return FilterAnalysisResult(
-            recommendations=["❌ Отсутствуют данные гироскопа в диапазоне выше 50 Гц."]
+            recommendations=["❌ Отсутствуют данные гироскопа в диапазоне выше 30 Гц."]
         )
 
     max_p = np.max(p_valid)
@@ -51,7 +51,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     # Шаг 2: Проверка на «плоский» или чистый лог
     if max_p <= mean_p * 2.0 or max_p < 0.5:
         recommendations.append(
-            "⚠️ Лог в рабочей зоне (>50 Гц) выглядит относительно ровным или чистым (нет резких выраженных пиков резонанса)."
+            "⚠️ Лог в рабочей зоне (>30 Гц) выглядит относительно ровным или чистым (нет резких выраженных пиков резонанса)."
         )
         recommendations.append(
             "💡 Что проверить: убедитесь, что в конфигураторе Blackbox включен лог сырого гироскопа (pre-filter) "
@@ -63,7 +63,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Шаг 3: Поиск реальных пиков вибраций через локальную огибающую (независимо от общего максимума)
+    # Шаг 3: Поиск реальных пиков вибраций через локальную огибающую
     window_size = max(5, int(len(f_valid) * 0.03))
     if window_size % 2 == 0:
         window_size += 1
@@ -75,13 +75,12 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         end = min(len(p_valid), i + half_w + 1)
         envelope[i] = np.max(p_valid[start:end])
 
-    # Используем локальную медиану, чтобы локальные выбросы не искажали общую планку
     env_mean = np.median(envelope)
     env_threshold = max(env_mean * 3.0, 10.0)
 
     candidates = []
     for i in range(half_w, len(f_valid) - half_w):
-        if f_valid[i] < 50.0:
+        if f_valid[i] < 30.0:
             continue
 
         current_val = envelope[i]
@@ -104,7 +103,6 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             scored_peaks.append((p_valid[idx], cf))
 
         scored_peaks.sort(key=lambda x: x[0], reverse=True)
-        # Отбираем пики, уверенно возвышающиеся над медианным фоном
         noise_peaks = sorted([item[1] for item in scored_peaks[:2] if item[0] >= env_mean * 3.5])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
@@ -130,7 +128,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             )
             cli_commands.append(f"set gyro_lowpass2_hz = {int(max(130, max_peak - 30))}")
 
-        elif 60.0 <= max_peak < 150.0:
+        elif 30.0 <= max_peak < 150.0:
             recommendations.append(
                 f"⚠️ Низкочастотный резонанс (~{int(max_peak)} Гц): "
                 "Обычно вызван недостаточной жесткостью рамы, люфтами в стэке "
@@ -147,7 +145,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     else:
         recommendations.append(
             "✅ Шумовой профиль в норме: "
-            "Опасных резонансов выше 50 Гц не обнаружено. "
+            "Опасных резонансов выше 30 Гц не обнаружено. "
             "Текущие настройки фильтрации работают оптимально, дополнительное зажатие фильтров не требуется."
         )
 

@@ -72,35 +72,56 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Шаг 3: Поиск реальных пиков вибраций (отсекаем фоновый шум с помощью адаптивного порога)
-    peak_threshold = mean_p * 2.5
-    potential_peak_mask = p_valid > peak_threshold
+    # Шаг 3: Поиск реальных пиков вибраций через построение огибающей (Envelope / Rolling Max)
+    # Это исключает хаотичное цепляние за случайные зубцы («частокол») и находит именно широкие холмы резонансов
+    window_size = max(3, int(len(f_valid) * 0.05))  # Окно сглаживания под размер сетки
+    if window_size % 2 == 0:
+        window_size += 1
+
+    # Вычисляем скользящий максимум (огибающую спектра)
+    envelope = np.copy(p_valid)
+    half_w = window_size // 2
+    for i in range(len(p_valid)):
+        start = max(0, i - half_w)
+        end = min(len(p_valid), i + half_w + 1)
+        envelope[i] = np.max(p_valid[start:end])
+
+    # Порог для огибающей: холм должен заметно подниматься над средним фоном
+    env_mean = np.mean(envelope)
+    env_threshold = env_mean * 1.5
     
-    if np.any(potential_peak_mask):
-        peak_freqs = f_valid[potential_peak_mask]
-        candidates = []
+    # Ищем точки, где огибающая выше порога и является локальным максимумом внутри своего окна
+    candidates = []
+    for i in range(half_w, len(f_valid) - half_w):
+        if f_valid[i] < 60.0:
+            continue
         
-        for f in peak_freqs:
-            # Дополнительно защищаемся от захвата низких частот ближе к 50 Гц
-            if f < 60.0:
-                continue
-            # Исключаем слишком близко стоящие друг к другу дублирующие точки (интервалом менее 25 Гц)
-            if not candidates or all(abs(f - existing) > 25.0 for existing in candidates):
-                candidates.append(float(f))
+        current_val = envelope[i]
+        # Проверяем, что это вершина холма (локальный максимум) и выше порога
+        if current_val >= env_threshold:
+            is_local_max = True
+            # Сравниваем с соседями в пределах полуокна
+            for j in range(i - half_w, i + half_w + 1):
+                if envelope[j] > current_val:
+                    is_local_max = False
+                    break
+            
+            if is_local_max:
+                f_cand = float(f_valid[i])
+                # Исключаем слишком близко стоящие друг к другу дублирующие точки (менее 35 Гц)
+                if not candidates or all(abs(f_cand - existing) > 35.0 for existing in candidates):
+                    candidates.append(f_cand)
+
+    # Ранжируем найденные холмы по их реальной мощности
+    if candidates:
+        scored_peaks = []
+        for cf in candidates:
+            idx = np.argmin(np.abs(f_valid - cf))
+            scored_peaks.append((p_valid[idx], cf))
         
-        # Ранжируем найденные пики по их реальной мощности (амплитуде)
-        if candidates:
-            scored_peaks = []
-            for cf in candidates:
-                # Находим индекс ближайшей частоты в массиве
-                idx = np.argmin(np.abs(f_valid - cf))
-                scored_peaks.append((p_valid[idx], cf))
-            
-            # Сортируем по убыванию мощности (самые мощные пики — на первом месте)
-            scored_peaks.sort(key=lambda x: x[0], reverse=True)
-            
-            # Берем топ-2 самых опасных резонансных пика
-            noise_peaks = sorted([item[1] for item in scored_peaks[:2]])
+        scored_peaks.sort(key=lambda x: x[0], reverse=True)
+        # Берем топ-2 самых мощных и выраженных резонанса
+        noise_peaks = sorted([item[1] for item in scored_peaks[:2]])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
     if noise_peaks:

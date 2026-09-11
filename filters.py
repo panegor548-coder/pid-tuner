@@ -63,7 +63,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Метод субполос (биений по 50 Гц): ищем пики в каждом окне независимо, чтобы мощные низы не глушили верхи
+    # Метод субполос (биений по 50 Гц): ищем пики в каждом окне независимо
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -74,7 +74,6 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     while current_start < max_f:
         current_end = current_start + chunk_size
         
-        # Выделяем срез частот для текущего диапазона (например, 30-80, 80-130 и т.д.)
         chunk_mask = (f_valid >= current_start) & (f_valid < current_end)
         if np.any(chunk_mask):
             f_chunk = f_valid[chunk_mask]
@@ -84,21 +83,18 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Если в этом конкретном диапазоне есть пик, который заметно выше локального фона куска
                 if chunk_max > chunk_median * 2.8 and chunk_max > 20.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     
-                    # Проверяем, что пик не прилип вплотную к границе среза и уникален
-                    if not candidates or all(abs(peak_freq - existing) > 25.0 for existing in candidates):
+                    # Исправлено: сравниваем peak_freq с уже сохраненными частотами (элементы [1] из candidates)
+                    if not candidates or all(abs(peak_freq - existing_freq) > 25.0 for _, existing_freq in candidates):
                         candidates.append((chunk_max, peak_freq))
 
         current_start = current_end
 
-    # Сортируем найденные по всем кускам пики по силе мощности
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        # Берем топ-2 самых ярких независимых пика из разных диапазонов
         noise_peaks = sorted([item[1] for item in candidates[:2]])
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)

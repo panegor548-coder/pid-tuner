@@ -19,7 +19,7 @@ class FilterAnalysisResult:
 
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
-    Анализирует FFT спектр гироскопа по методу субполосных блоков (chunks по 50 Гц).
+    Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц).
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -63,7 +63,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Метод субполос (биений по 50 Гц): ищем пики в каждом окне независимо
+    # Истинный субполосный метод: проверяем каждый 50 Гц блок автономно
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -83,19 +83,20 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                if chunk_max > chunk_median * 2.8 and chunk_max > 20.0:
+                # Если в этом конкретном диапазоне есть пик выше его собственного локального фона
+                if chunk_max > chunk_median * 2.5 and chunk_max > 10.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     
-                    # Исправлено: сравниваем peak_freq с уже сохраненными частотами (элементы [1] из candidates)
-                    if not candidates or all(abs(peak_freq - existing_freq) > 25.0 for _, existing_freq in candidates):
-                        candidates.append((chunk_max, peak_freq))
+                    # Добавляем пик, если он не дублирует соседний из этого же чанка
+                    if not candidates or all(abs(peak_freq - existing) > 20.0 for existing in candidates):
+                        candidates.append(peak_freq)
 
         current_start = current_end
 
+    # Сортируем найденные локальные пики по частоте (от меньших к большим)
     if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        noise_peaks = sorted([item[1] for item in candidates[:2]])
+        noise_peaks = sorted(candidates)
 
     # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
     if noise_peaks:
@@ -110,7 +111,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 "или шумами от регуляторов оборотов (ESC). Рекомендуется проверить механику и сузить полосу динамического фильтра."
             )
             cli_commands.append(f"set dyn_notch_max_hz = {int(min(550, max_peak + 50))}")
-            cli_commands.append("set dyn_notch_width_hz = 10")
+            cli_commands.append(f"set dyn_notch_width_hz = 10")
 
         elif 150.0 <= max_peak <= 300.0:
             recommendations.append(

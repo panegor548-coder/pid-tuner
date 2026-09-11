@@ -20,7 +20,7 @@ class FilterAnalysisResult:
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
     Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц)
-    с балансом: строгое локальное превышение + 3-4% от максимума оси для отсечения невидимого шума.
+    с фиксированным абсолютным порогом и строгой локальной медианой.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -64,7 +64,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Субполосный метод: независимая проверка каждого 50 Гц блока
+    # Субполосный метод: независимая проверка каждого 50 Гц блока с фиксированным абсолютным фильтром
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -84,9 +84,8 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Баланс: пик должен быть в 5 раз выше своего локального фона 
-                # И составлять не менее 3.5% от максимума данной оси (отсекает то, что на фоне шума вообще не ощущается)
-                if chunk_max > chunk_median * 5.0 and chunk_max >= global_max * 0.035:
+                # Фиксированный абсолютный порог (например, 15000) + строгое локальное превышение в 4.5 раза
+                if chunk_max > chunk_median * 4.5 and chunk_max > 15000.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     

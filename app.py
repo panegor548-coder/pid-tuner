@@ -27,9 +27,14 @@ st.markdown(
 
 # --- БОКОВАЯ ПАНЕЛЬ ДЛЯ ЗАГРУЗКИ ДАННЫХ ЛОГА ---
 st.sidebar.header("Источник данных лога")
+st.sidebar.info(
+    "⚠️ Внимание: поддерживаются **только файлы в формате .csv**. "
+    "Предварительно выгрузите лог из Blackbox Explorer Betaflight в формат CSV."
+)
+
 uploaded_file = st.sidebar.file_uploader(
-    "Выберите файл лога (.bbl, .bfl, .csv)",
-    type=["bbl", "bfl", "csv", "txt"]
+    "Выберите CSV-файл лога Blackbox",
+    type=["csv"]
 )
 
 file_bytes = uploaded_file.read() if uploaded_file is not None else None
@@ -143,7 +148,7 @@ if file_bytes is None:
     with tab_guide:
         render_cheatsheet()
 
-    st.sidebar.warning("👈 Загрузите файл лога для активации вкладок анализа.")
+    st.sidebar.warning("👈 Загрузите CSV-файл лога для активации вкладок анализа.")
     st.stop()
 
 # --- ЕСЛИ ФАЙЛ ЗАГРУЖЕН: ПАРСИМ И ПОКАЗЫВАЕМ ПОЛНЫЙ НАБОР ВКЛАДОК ---
@@ -242,8 +247,6 @@ with tab_filters:
     filter_sub_tabs = st.tabs([a.capitalize() for a in axis_metrics.keys()])
     for tab, (axis, m) in zip(filter_sub_tabs, axis_metrics.items()):
         with tab:
-            # Резонансы (>80 Гц) ищем по полному спектру — утечка от манёвра сосредоточена
-            # в первых Гц и сюда не долетает, поэтому analyze_noise_and_filters не трогаем.
             f_res = analyze_noise_and_filters(m.freqs, m.power)
 
             col1, col2 = st.columns([1, 1.5])
@@ -256,13 +259,6 @@ with tab_filters:
                     st.code("\n".join(f_res.cli_commands), language="text")
             with col2:
                 if show_fft and m.freqs is not None and m.power is not None:
-                    # ФИКС масштаба графика: раньше строился по m.freqs/m.power целиком, а ось X
-                    # просто обрезалась через xaxis=dict(range=[0, 400]). Plotly считает автоскейл
-                    # оси Y по ВСЕМ точкам трейса, а не только по видимому диапазону X — из-за
-                    # огромного "пика" на первых Гц (утечка энергии самого манёвра, не реальный шум)
-                    # весь остальной спектр визуально схлопывался в плоскую линию у нуля.
-                    # Теперь заранее обрезаем и частоты, и мощность до отображаемого диапазона,
-                    # и явно задаём разумный range для оси Y по 99-му перцентилю видимого диапазона.
                     f_disp, p_disp, y_max = get_display_spectrum(m.freqs, m.power, min_freq_hz=2.0, max_freq_hz=400.0)
 
                     fig_fft = go.Figure()

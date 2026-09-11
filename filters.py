@@ -20,13 +20,13 @@ class FilterAnalysisResult:
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
     Анализирует FFT спектр гироскопа с проверкой качества данных.
-    
+
     Логика работы:
     1. Проверяет наличие и целостность входных данных.
     2. Обязательно отсекает диапазон ниже 50 Гц (где находятся движения стиков пилота и маневры дрона).
     3. Оценивает соотношение максимального пика к среднему уровню шума в рабочем диапазоне (50–400 Гц).
     4. Если спектр ровный (нет выраженных резонансов) — сообщает, что фильтрация оптимальна.
-    5. Если обнаружены реальные резонансы рамы или моторов — классифицирует их по частотам 
+    5. Если обнаружены реальные резонансы рамы или моторов — классифицирует их по частотам
        и формирует точные команды для CLI Betaflight.
     """
     if freqs is None or power is None or len(freqs) == 0:
@@ -47,7 +47,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
 
     f_valid = freqs[valid_mask]
     p_valid = power[valid_mask]
-    
+
     if len(p_valid) == 0:
         return FilterAnalysisResult(
             recommendations=["❌ Отсутствуют данные гироскопа в диапазоне выше 50 Гц."]
@@ -89,13 +89,13 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     # Порог для огибающей: холм должен заметно подниматься над средним фоном
     env_mean = np.mean(envelope)
     env_threshold = env_mean * 1.5
-    
+
     # Ищем точки, где огибающая выше порога и является локальным максимумом внутри своего окна
     candidates = []
     for i in range(half_w, len(f_valid) - half_w):
         if f_valid[i] < 60.0:
             continue
-        
+
         current_val = envelope[i]
         # Проверяем, что это вершина холма (локальный максимум) и выше порога
         if current_val >= env_threshold:
@@ -105,7 +105,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 if envelope[j] > current_val:
                     is_local_max = False
                     break
-            
+
             if is_local_max:
                 f_cand = float(f_valid[i])
                 # Исключаем слишком близко стоящие друг к другу дублирующие точки (менее 35 Гц)
@@ -118,7 +118,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         for cf in candidates:
             idx = np.argmin(np.abs(f_valid - cf))
             scored_peaks.append((p_valid[idx], cf))
-        
+
         scored_peaks.sort(key=lambda x: x[0], reverse=True)
         # Берем топ-2 самых мощных и выраженных резонанса
         noise_peaks = sorted([item[1] for item in scored_peaks[:2]])
@@ -127,9 +127,9 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     if noise_peaks:
         peaks_str = ", ".join([f"{p:.1f} Гц" for p in noise_peaks])
         recommendations.append(f"🔍 Обнаружены выраженные пики вибраций на частотах: {peaks_str}")
-        
+
         max_peak = max(noise_peaks)
-        
+
         if max_peak > 300.0:
             recommendations.append(
                 "⚙️ **Высокочастотный шум (>300 Гц):** Часто связан с дисбалансом пропеллеров, поврежденными подшипниками моторов "
@@ -137,14 +137,14 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             )
             cli_commands.append(f"set dyn_notch_max_hz = {int(min(550, max_peak + 50))}")
             cli_commands.append("set dyn_notch_width_hz = 10")
-            
+
         elif 150.0 <= max_peak <= 300.0:
             recommendations.append(
                 f"⚙️ **Резонанс рамы среднего диапазона (~{int(max_peak)} Гц):** Типичная частота для карбоновых рам среднего размера. "
                 "Убедитесь, что включен RPM-фильтр. При сильном зуде скорректируйте частоту Gyro Lowpass 2."
             )
             cli_commands.append(f"set gyro_lowpass2_hz = {int(max(130, max_peak - 30))}")
-            
+
         elif 60.0 <= max_peak < 150.0:
             recommendations.append(
                 f"⚠️ **Низкочастотный резонанс (~{int(max_peak)} Гц):** Обычно вызван недостаточной жесткостью рамы, люфтами в стэке "

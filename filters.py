@@ -20,7 +20,7 @@ class FilterAnalysisResult:
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
     Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц)
-    с балансом: строгое локальное превышение + 3-4% от максимума оси для отсечения невидимого шума.
+    с адаптивным поиском пиков и обязательным предупреждением для визуальной проверки пользователем.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -60,11 +60,11 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
         )
         return FilterAnalysisResult(
             noise_peaks=[],
-            recommendations=recommendations,
+            recommendations,
             cli_commands=[]
         )
 
-    # Субполосный метод: независимая проверка каждого 50 Гц блока
+    # Субполосный метод: независимая проверка каждого 50 Гц блока по локальной медиане
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -84,9 +84,9 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Баланс: пик должен быть в 5 раз выше своего локального фона 
-                # И составлять не менее 3.5% от максимума данной оси (отсекает то, что на фоне шума вообще не ощущается)
-                if chunk_max > chunk_median * 5.0 and chunk_max >= global_max * 0.035:
+                # Адаптивный поиск: пик должен заметно выделяться на фоне своего локального окружения (в 4 раза)
+                # Без жестких ограничений по абсолютной мощности, чтобы не терять реальные слабые резонансы.
+                if chunk_max > chunk_median * 4.0:
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     
@@ -98,48 +98,46 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
     if candidates:
         noise_peaks = sorted(candidates)
 
-    # Шаг 4: Формирование экспертных рекомендаций на основе найденных частот (методика Криса Россера)
+    # Формирование экспертных рекомендаций (методика Криса Россера)
     if noise_peaks:
         peaks_str = ", ".join([f"{p:.1f} Гц" for p in noise_peaks])
-        recommendations.append(f"🔍 Обнаружены выраженные пики вибраций по диапазонам: {peaks_str}")
+        recommendations.append(f"🔍 Автоматика обнаружила пики на частотах: {peaks_str}")
+        
+        # ВАЖНОЕ ПРЕДУПРЕЖДЕНИЕ ДЛЯ ПОЛЬЗОВАТЕЛЯ
+        recommendations.append(
+            "⚠️ **Внимание — визуальная проверка:** Обязательно посмотрите на график спектра глазами! "
+            "Если линия на указанных частотах выглядит абсолютно ровной и «плоской» без резких торчащих бугров, "
+            "это ложное срабатывание алгоритма на фоне шума. **Не применяйте CLI-команды**, если график чистый."
+        )
 
         max_peak = max(noise_peaks)
 
         if max_peak > 300.0:
             recommendations.append(
-                "⚙️ **Высокочастотный шум (>300 Гц):** Часто связан с дисбалансом пропеллеров, поврежденными подшипниками моторов "
-                "или шумами от регуляторов оборотов (ESC). Рекомендуется проверить механику и сузить полосу динамического фильтра."
+                "⚙️ **Высокочастотный шум (>300 Гц):** Возможен дисбаланс пропеллеров или проблемы с подшипниками моторов."
             )
             cli_commands.append(f"set dyn_notch_max_hz = {int(min(550, max_peak + 50))}")
             cli_commands.append("set dyn_notch_width_hz = 10")
 
         elif 150.0 <= max_peak <= 300.0:
             recommendations.append(
-                f"⚙️ Резонанс рамы среднего диапазона (~{int(max_peak)} Гц): "
-                "Типичная частота для карбоновых рам среднего размера. "
-                "Убедитесь, что включен RPM-фильтр. При сильном зуде скорректируйте частоту Gyro Lowpass 2."
+                f"⚙️ Резонанс рамы (~{int(max_peak)} Гц): типичный диапазон для средних рам. Убедитесь, что включен RPM-фильтр."
             )
             cli_commands.append(f"set gyro_lowpass2_hz = {int(max(130, max_peak - 30))}")
 
         elif 30.0 <= max_peak < 150.0:
             recommendations.append(
-                f"⚠️ Низкочастотный резонанс (~{int(max_peak)} Гц): "
-                "Обычно вызван недостаточной жесткостью рамы, люфтами в стэке "
-                "или касанием проводов корпуса полетного контроллера. Проверьте механическую сборку перед программным зажатием фильтров."
+                f"⚠️ Низкочастотный резонанс (~{int(max_peak)} Гц): проверьте жесткость рамы, стэк и укладку провода USB/питания."
             )
             cli_commands.append(f"set gyro_lowpass_hz = {int(max(70, max_peak - 15))}")
 
         recommendations.append(
-            "💡 Совет по настройке: "
-            "Убедитесь, что задействован двунаправленный RPM-фильтр (Bi-directional DShot). "
-            "Это позволяет агрессивнее распускать статические фильтры и сохранять минимальную задержку управления."
+            "💡 Базовое правило: если сомневаетесь в наличии пика на графике — лучше оставьте фильтры дефолтными."
         )
         cli_commands.append("save")
     else:
         recommendations.append(
-            "✅ Шумовой профиль в норме: "
-            "Опасных резонансов ни в одном из диапазонов не обнаружено. "
-            "Текущие настройки фильтрации работают оптимально, дополнительное зажатие фильтров не требуется."
+            "✅ Шумовой профиль в норме: опасных резонансов ни в одном из диапазонов не обнаружено. Фильтры менять не нужно."
         )
 
     return FilterAnalysisResult(

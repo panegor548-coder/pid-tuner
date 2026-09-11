@@ -19,7 +19,8 @@ class FilterAnalysisResult:
 
 def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.ndarray]) -> FilterAnalysisResult:
     """
-    Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц).
+    Анализирует FFT спектр гироскопа по методу независимых субполосных блоков (chunks по 50 Гц)
+    с усовершенствованной фильтрацией мелких ложных зубцов.
     """
     if freqs is None or power is None or len(freqs) == 0:
         return FilterAnalysisResult(
@@ -63,7 +64,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             cli_commands=[]
         )
 
-    # Истинный субполосный метод: проверяем каждый 50 Гц блок автономно
+    # Субполосный метод с жестким контролем значимости пика
     chunk_size = 50.0
     min_f = 30.0
     max_f = 400.0
@@ -83,18 +84,17 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 chunk_max = np.max(p_chunk)
                 chunk_median = np.median(p_chunk)
                 
-                # Если в этом конкретном диапазоне есть пик выше его собственного локального фона
-                if chunk_max > chunk_median * 2.5 and chunk_max > 10.0:
+                # Жёсткий фильтр: пик должен быть в 4+ раза выше локального фона 
+                # И составлять значимую величину (отсекаем мелкую рябь и шумку)
+                if chunk_max > chunk_median * 4.0 and chunk_max > max(200.0, global_max * 0.03):
                     peak_idx = np.argmax(p_chunk)
                     peak_freq = float(f_chunk[peak_idx])
                     
-                    # Добавляем пик, если он не дублирует соседний из этого же чанка
                     if not candidates or all(abs(peak_freq - existing) > 20.0 for existing in candidates):
                         candidates.append(peak_freq)
 
         current_start = current_end
 
-    # Сортируем найденные локальные пики по частоте (от меньших к большим)
     if candidates:
         noise_peaks = sorted(candidates)
 
@@ -111,7 +111,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
                 "или шумами от регуляторов оборотов (ESC). Рекомендуется проверить механику и сузить полосу динамического фильтра."
             )
             cli_commands.append(f"set dyn_notch_max_hz = {int(min(550, max_peak + 50))}")
-            cli_commands.append(f"set dyn_notch_width_hz = 10")
+            cli_commands.append("set dyn_notch_width_hz = 10")
 
         elif 150.0 <= max_peak <= 300.0:
             recommendations.append(
@@ -125,7 +125,7 @@ def analyze_noise_and_filters(freqs: Optional[np.ndarray], power: Optional[np.nd
             recommendations.append(
                 f"⚠️ Низкочастотный резонанс (~{int(max_peak)} Гц): "
                 "Обычно вызван недостаточной жесткостью рамы, люфтами в стэке "
-                "или касанием проводов корпуса полетного контроллера. Проверьте механическую сборку перед программным зажатием фильтров."
+                "или касанием проводов корпуса полетного контроллера. Проверьте механику перед программным зажатием фильтров."
             )
             cli_commands.append(f"set gyro_lowpass_hz = {int(max(70, max_peak - 15))}")
 

@@ -1,15 +1,6 @@
 """
-analyzer.py — парсинг Betaflight blackbox-логов (CSV) и эвристический расчёт PID.
-
-Важно про форматы:
-- Реальный .bbl — бинарный формат с предиктивным кодированием. Разобрать его
-  напрямую на чистом Python практически невозможно без порта официального
-  декодера. Рабочий путь: экспортировать .bbl в .csv через Blackbox Explorer
-  (File -> Export data as CSV) или `blackbox_decode --stdout log.bbl > log.csv`,
-  а сюда уже грузить .csv.
-- Этот модуль умеет читать именно CSV, который Blackbox Explorer/blackbox_decode
-  генерируют: несколько строк-комментариев вида "H fieldName:value" в начале
-  файла, затем обычная CSV-таблица с колонками гироскопа, setpoint и т.д.
+analyzer.py — парсинг Betaflight blackbox-логов (CSV) и эвристический расчёт PID
+с учетом методологии Betaflight 4.4 (по гайдам Криса Россера).
 """
 
 from __future__ import annotations
@@ -54,11 +45,9 @@ def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _find_dynamic_column(df: pd.DataFrame, kind: str, axis_index: int) -> Optional[str]:
-    """Универсальный поиск колонок гироскопа и setpoint под любые версии экспорта."""
     cols = list(df.columns)
     cols_lower = [c.lower() for c in cols]
     
-    # Специфичные шаблоны для точного совпадения
     if kind == "time":
         for pat in ["time (us)", "time(us)", "time"]:
             for i, cl in enumerate(cols_lower):
@@ -66,7 +55,6 @@ def _find_dynamic_column(df: pd.DataFrame, kind: str, axis_index: int) -> Option
                     return cols[i]
         return None
 
-    # Ключевые слова для поиска по типу
     if kind == "gyro":
         keywords = [
             f"gyroadc[{axis_index}]", f"gyrodata[{axis_index}]", f"gyro[{axis_index}]",
@@ -74,19 +62,17 @@ def _find_dynamic_column(df: pd.DataFrame, kind: str, axis_index: int) -> Option
         ]
     elif kind == "setpoint":
         keywords = [
-            f"setpoint[{axis_index}]", f"rccommand[{axis_index}]", f"rcCommand[{axis_index}]".lower(),
+            f"setpoint[{axis_index}]", f"rccommand[{axis_index}]", f"rccommand[{axis_index}]".lower(),
             f"setpoint_{axis_index}", f"debug[{axis_index}]"
         ]
     else:
         keywords = []
 
-    # 1. Пробуем точные варианты с индексами
     for kw in keywords:
         for i, cl in enumerate(cols_lower):
             if kw in cl:
                 return cols[i]
 
-    # 2. Если точный индекс не найден, ищем по общим словам и порядку осей (0->roll, 1->pitch, 2->yaw)
     target_words = []
     if kind == "gyro":
         target_words = ["gyro", "gyroadc", "gyrounfilt"]
@@ -107,7 +93,6 @@ def _find_dynamic_column(df: pd.DataFrame, kind: str, axis_index: int) -> Option
 
 
 def parse_header(raw_text: str) -> dict:
-    """Достаёт метаданные из строк вида 'H rollPID:45,80,30'."""
     headers = {}
     for line in raw_text.splitlines():
         line = line.strip()
@@ -136,7 +121,6 @@ def _extract_current_pid(headers: dict, axis: str) -> Optional[tuple]:
 
 
 def load_log(file_bytes: bytes) -> tuple[pd.DataFrame, dict, float]:
-    """Читает CSV-лог, возвращает (DataFrame, метаданные заголовка, частота сэмплирования Гц)."""
     text = file_bytes.decode("utf-8", errors="replace")
     headers = parse_header(text)
 
@@ -161,15 +145,11 @@ def load_log(file_bytes: bytes) -> tuple[pd.DataFrame, dict, float]:
 
     time_col = _find_dynamic_column(df, "time", 0)
     if time_col is None:
-        raise ValueError(
-            f"Не нашёл колонку времени в CSV. Доступные колонки в файле: {list(df.columns)[:15]}"
-        )
+        raise ValueError(f"Не нашёл колонку времени в CSV. Доступные колонки: {list(df.columns)[:15]}")
 
     test_gyro = _find_dynamic_column(df, "gyro", 0)
     if test_gyro is None:
-        raise ValueError(
-            f"Не нашёл колонку гироскопа. Все доступные колонки в твоем файле: {list(df.columns)}"
-        )
+        raise ValueError(f"Не нашёл колонку гироскопа. Доступные колонки: {list(df.columns)}")
 
     t = pd.to_numeric(df[time_col], errors="coerce").dropna().to_numpy()
     if len(t) < 10:
@@ -203,6 +183,7 @@ def _band_power(freqs: np.ndarray, power: np.ndarray, lo: float, hi: float) -> f
 
 
 def _estimate_overshoot(setpoint: np.ndarray, gyro: np.ndarray, sample_rate_hz: float) -> float:
+    """Оценивает переброс (overshoot) по реакции гироскопа на резкие изменения setpoint."""
     if len(setpoint) < int(sample_rate_hz * 0.1):
         return 0.0
 
@@ -260,7 +241,6 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
     notes: list[str] = []
     gyro = pd.to_numeric(df[gyro_col], errors="coerce").fillna(0).to_numpy()
     
-    # Проверка на пустые или статичные данные гироскопа
     if len(gyro) == 0 or np.all(gyro == gyro[0]):
         notes.append("❌ Данные гироскопа статичны или отсутствуют для этой оси.")
 
@@ -268,7 +248,7 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
         setpoint = pd.to_numeric(df[sp_col], errors="coerce").fillna(0).to_numpy()
     else:
         setpoint = pd.Series(gyro).rolling(5, min_periods=1, center=True).mean().to_numpy()
-        notes.append("⚠️ Колонка setpoint/rcCommand не найдена, отработка заданий не оценивалась.")
+        notes.append("⚠️ Колонка setpoint не найдена, оценка отработки заданий ограничена.")
 
     n = min(len(gyro), len(setpoint))
     gyro, setpoint = gyro[:n], setpoint[:n]
@@ -314,6 +294,7 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
         setpoint=setpoint,
         error=error,
     )
+    
     suggested_pid, suggest_notes = suggest_pid(metrics)
     metrics.suggested_pid = suggested_pid
     metrics.notes = notes + suggest_notes
@@ -321,58 +302,60 @@ def analyze_axis(df: pd.DataFrame, headers: dict, axis_index: int, axis: str,
 
 
 def suggest_pid(m: AxisMetrics) -> tuple[Optional[tuple], list[str]]:
+    """Эвристика PID с учетом баланса пружины (P) и демпфера/амортизатора (D)."""
     notes: list[str] = []
 
     if m.current_pid is None:
-        notes.append("Текущие PID не найдены в заголовке лога — используются условные "
-                     "дефолты Betaflight (45, 80, 30) как база для процентных поправок.")
+        notes.append("Текущие PID не найдены в заголовке лога — используются дефолты (45, 80, 30).")
         p, i, d = 45.0, 80.0, 30.0
     else:
         p, i, d = m.current_pid
 
     p_mult, i_mult, d_mult = 1.0, 1.0, 1.0
 
+    # Анализ колебаний (эквивалент избытка P или слабого D)
     if m.oscillation_score > 0.35:
         p_mult -= 0.10
         d_mult += 0.08
-        notes.append(f"Заметны низкочастотные колебания ошибки (~{m.dominant_freq_hz:.0f} Гц) "
-                     f"— снижаю P и немного поднимаю D." if m.dominant_freq_hz else
-                     "Заметны низкочастотные колебания ошибки — снижаю P и немного поднимаю D.")
+        notes.append(
+            f"⚡ Замечены низкочастотные колебания (~{m.dominant_freq_hz:.0f} Гц). "
+            "Это значит, что 'пружина' (P) слишком сильная, либо 'амортизатор' (D) слабый — снижаем P, поднимаем D."
+            if m.dominant_freq_hz else
+            "⚡ Замечены низкочастотные колебания — снижаем P, поднимаем D для демпфирования."
+        )
     elif m.oscillation_score < 0.08 and m.mean_abs_error > 0:
-        p_mult += 0.06
-        notes.append("Колебаний почти нет, но есть отставание от setpoint — немного поднимаю P.")
+        p_mult += 0.05
+        notes.append("💡 Колебаний нет, отклик стабилен — можно немного поднять P для повышения резкости.")
 
+    # Анализ шума (эквивалент избытка D)
     if m.noise_score > 0.30:
-        d_mult -= 0.12
-        notes.append("Много высокочастотного шума в ошибке слежения — снижаю D.")
+        d_mult -= 0.10
+        notes.append("🔊 Высокий уровень высокочастотного шума в петле — рекомендуется уменьшить D или проверить фильтры.")
 
-    if m.overshoot_pct > 15:
+    # Анализ переброса (overshoot) по шагам
+    if m.overshoot_pct > 12:
         p_mult -= 0.05
         d_mult += 0.05
-        notes.append(f"Средний переброс после резких движений ~{m.overshoot_pct:.0f}% — "
-                     "чуть снижаю P и поднимаю D для демпфирования.")
+        notes.append(
+            f"🎯 Зафиксирован переброс (overshoot) ~{m.overshoot_pct:.0f}%. "
+            "Дрон перелетает целевую точку перед стабилизацией — слегка уменьшаем P и увеличиваем D."
+        )
 
-    steady_bias = float(np.mean(m.error[len(m.error)//2:])) if m.error is not None and len(m.error) else 0.0
-    if abs(steady_bias) > max(2.0, 0.05 * (np.std(m.setpoint) if m.setpoint is not None else 1)):
-        i_mult += 0.10
-        notes.append("Похоже на систематическое отставание/смещение — немного поднимаю I.")
-
-    p_mult = float(np.clip(p_mult, 0.85, 1.15))
+    p_mult = float(np.clip(p_mult, 0.80, 1.20))
     i_mult = float(np.clip(i_mult, 0.85, 1.15))
-    d_mult = float(np.clip(d_mult, 0.85, 1.20))
+    d_mult = float(np.clip(d_mult, 0.80, 1.25))
 
     new_p = round(p * p_mult)
     new_i = round(i * i_mult)
     new_d = round(d * d_mult)
 
     if not notes:
-        notes.append("Существенных проблем не обнаружено, поправки минимальны.")
+        notes.append("✅ Настройка сбалансирована, отклонения в пределах нормы.")
 
     return (new_p, new_i, new_d), notes
 
 
 def generate_demo_log(seed: int = 42, duration_s: float = 6.0, sample_rate_hz: float = 1000.0) -> bytes:
-    """Генерирует синтетический CSV-лог для проверки интерфейса без реального дрона."""
     rng = np.random.default_rng(seed)
     n = int(duration_s * sample_rate_hz)
     t_us = (np.arange(n) / sample_rate_hz * 1e6).astype(np.int64)
